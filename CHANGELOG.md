@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.23.1-luau.1 (local experimental build, not published)
+
+0.23.1 plus Luau. Everything else is 0.23.1 unchanged.
+
+### Added
+
+- **Luau files are indexed with their own grammar** (port of #266 by @ansien):
+  `.luau` is parsed by the vendored tree-sitter-luau 1.2.0, not by Lua's grammar,
+  so types, casts, compound assignment, `continue` and interpolated strings parse
+  structurally. Functions, methods, table-field functions and `type` /
+  `export type` aliases become symbols.
+- **Luau `require` is the module graph**: each require, by instance path or by
+  string, becomes an `imports` edge. With Rojo `*.project.json` files in the
+  repo, an absolute path (`game.ReplicatedStorage.Shared.Units`) resolves to the
+  file the place builds it from, in the places that run the requiring file.
+- **Calls through a required module resolve in that module**: `Units.toStuds()`
+  after `local Units = require(...)` lands on that module's `toStuds`, never on a
+  same-named function elsewhere, and is `extracted` (certain).
+- Lua and Luau share a call-resolution family, as Rojo reads both as Luau.
+
 ## 0.23.1
 
 ### Fixed

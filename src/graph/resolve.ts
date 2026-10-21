@@ -34,6 +34,11 @@ const PY_CTOR_KINDS: Kind[] = ["class"];
  * implicit-self widening) have found nothing. */
 const SWIFT_EXT = /\.swift$/i;
 const SWIFT_CTOR_KINDS: Kind[] = ["class", "struct", "enum"];
+/** A Luau file, whose `require`s resolve by instance path (see resolveLuauRequire). */
+const LUAU_EXT = /\.luau$/i;
+/** What a Luau require can land on: a ModuleScript, which Rojo reads from `.luau` or `.lua`.
+ * `.server.luau` / `.client.luau` are Scripts and cannot be required. */
+const LUAU_MODULE = /^(.*?)(?:\.(server|client))?\.(luau|lua)$/i;
 
 /**
  * Languages whose symbols can genuinely reach each other. A call edge may not
@@ -50,12 +55,14 @@ const SWIFT_CTOR_KINDS: Kind[] = ["class", "struct", "enum"];
  *
  * Only real interop is grouped here. TS/TSX/JS import each other freely; Kotlin,
  * Scala and Clojure compile against Java on one classpath; C and C++ share
- * headers. Everything else stands alone.
+ * headers; Roblox tooling (Rojo) reads `.lua` and `.luau` alike as Luau modules,
+ * so the two require each other. Everything else stands alone.
  */
 const FAMILIES: ReadonlyArray<readonly string[]> = [
   ["typescript", "tsx"],
   ["java", "kotlin", "scala", "clojure"],
   ["c", "cpp"],
+  ["lua", "luau"],
 ];
 const FAMILY_OF = new Map<string, string>();
 for (const group of FAMILIES) for (const lang of group) FAMILY_OF.set(lang, group[0]);
@@ -91,11 +98,25 @@ export interface GoModule {
   dir: string;
 }
 
+/** One `$path` mount from a Rojo `*.project.json` whose tree is a DataModel: the
+ * project file it came from, the instance path it builds (`["ReplicatedStorage",
+ * "Shared"]`) and the repo file or directory (posix) it is built from. A repo may hold
+ * several projects, mapping the same instance to different directories. */
+export interface RojoMount {
+  project: string;
+  instance: string[];
+  path: string;
+}
+
 export interface ResolveOptions {
   /** The Go modules found in the repo. Enables mapping Go import package paths
    * (`example.com/app/pkg/util`) to the in-repo directory they name, relative to the
    * owning module's `go.mod` location. Empty/absent → Go imports stay external strings. */
   goModules?: GoModule[];
+  /** The Rojo mounts found in the repo. Enables resolving an absolute Luau require
+   * (`game.ReplicatedStorage.Shared.Units`) to the file Rojo builds that instance from.
+   * Empty/absent → those fall back to a unique path-suffix match. */
+  rojoMounts?: RojoMount[];
 }
 
 export function resolveEdges(
@@ -128,9 +149,19 @@ export function resolveEdges(
   // node ids. A `use App\Models\User` names a PSR-4 class whose file mirrors the namespace
   // tail under some (unknown) source root, so the suffix is the portable key.
   const phpFilesBySuffix = new Map<string, string[]>();
+  // Luau module resolution: a module's instance identity (`src/shared/Units` for
+  // `Units.luau`, the directory for an `init.luau`) → its file node ids, and every
+  // directory-boundary suffix of that identity (`Units`, `shared/Units`, …) likewise.
+  const luau: LuauIndex = { byIdentity: new Map(), bySuffix: new Map(), mounts: opts.rojoMounts ?? [] };
   const hasGoModules = !!opts.goModules?.length;
   for (const n of nodes) {
     if (n.kind === "file") {
+      const mod = luauIdentity(n.path);
+      if (mod !== null) {
+        push(luau.byIdentity, mod, n.id);
+        const parts = mod.split("/");
+        for (let i = 0; i < parts.length; i++) push(luau.bySuffix, parts.slice(i).join("/"), n.id);
+      }
       if (hasGoModules && n.path.endsWith(".go")) {
         const dir = posix.dirname(toPosixPath(n.path));
         push(goFilesByDir, dir, n.id);
@@ -204,6 +235,9 @@ export function resolveEdges(
   for (const e of rawEdges) {
     if (e.relation === "contains" && e.targetId) {
       add(e.source, e.targetId, "contains", "extracted");
+    } else if (e.relation === "imports" && e.specifier && LUAU_EXT.test(e.file)) {
+      // A require can name one module per place that runs the file (resolveLuauRequire).
+      for (const target of resolveLuauRequire(e.specifier, e.file, luau)) add(e.source, target, "imports", "extracted");
     } else if (e.relation === "imports" && e.specifier) {
       const target =
         hasGoModules && e.file.endsWith(".go")
@@ -290,6 +324,24 @@ export function resolveEdges(
         // here — a name defined as both member and free function yields the
         // member edge alone, exactly as Swift dispatches it.
         if (!e.implicitSelf) continue;
+      }
+      if (e.specifier && LUAU_EXT.test(e.file)) {
+        // A Luau call through a require-bound name (`Route.build()` after `local Route =
+        // require(...)`) names its module. When that module is an in-repo file, the
+        // name is looked up there and nowhere else: a unique function/method is a
+        // certain edge, and a miss drops rather than borrowing a same-named function
+        // from some other module. A module outside the repo falls through to the
+        // bare-name rule below, which is what every other breadth-tier call gets.
+        const modules = resolveLuauRequire(e.specifier, e.file, luau).filter((t) => byId.has(t));
+        if (modules.length > 0) {
+          for (const target of modules) {
+            const inModule = (perFileName.get(target)?.get(e.name!) ?? []).filter(
+              (n) => n.kind === "function" || n.kind === "method",
+            );
+            if (inModule.length === 1) add(e.source, inModule[0].id, "calls", "extracted");
+          }
+          continue;
+        }
       }
       // Every language's bare-name call is a free function, except R (Phase 4):
       // an untyped `obj$method()` there sets e.kinds to also allow a "method"
@@ -627,6 +679,185 @@ function resolveRustUse(spec: string, file: string, byId: Map<string, NodeV1>, c
     if (hits.size === 1) return [...hits][0];
   }
   return full === "" ? "crate" : `crate::${full.replace(/\//g, "::")}`;
+}
+
+/** The Luau module index resolveLuauRequire reads: see resolveEdges. */
+interface LuauIndex {
+  byIdentity: Map<string, string[]>;
+  bySuffix: Map<string, string[]>;
+  mounts: RojoMount[];
+}
+
+/** The instance a Luau file builds, as a repo path without extension: `a/Foo` for
+ * `a/Foo.luau`, the directory `a` for `a/init.luau` (Rojo makes the folder the module).
+ * Null for a non-Lua(u) file, and — unless `scripts` — for a `.server`/`.client` Script,
+ * which is not a ModuleScript and so cannot be required. */
+function luauIdentity(path: string, scripts = false): string | null {
+  const m = toPosixPath(path).match(LUAU_MODULE);
+  if (!m || (m[2] && !scripts)) return null;
+  const stem = m[1];
+  const slash = stem.lastIndexOf("/");
+  if (stem.slice(slash + 1) !== "init") return stem;
+  return slash < 0 ? "" : stem.slice(0, slash);
+}
+
+const luauParent = (p: string | null): string | null => (p === null || p === "" ? null : p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+const luauChild = (p: string | null, name: string): string | null => (p === null ? null : p === "" ? name : `${p}/${name}`);
+
+/** The instance path a repo path sits at in one project: under the longest of that
+ * project's mounts holding it, or null when the project does not build it. */
+function luauInstanceIn(identity: string, mounts: RojoMount[]): string[] | null {
+  return luauMountOf(identity, mounts)?.instance ?? null;
+}
+
+/** The longest of these mounts holding a repo path: how long its root is, and the
+ * instance path the repo path gets under it. */
+function luauMountOf(identity: string, mounts: RojoMount[]): { len: number; instance: string[] } | null {
+  let best: { len: number; instance: string[] } | null = null;
+  for (const m of mounts) {
+    const root = mountIdentity(m);
+    if (root === null) continue;
+    let rest: string[] | null = null;
+    if (identity === root) rest = [];
+    else if (root === "" || identity.startsWith(`${root}/`)) rest = identity.slice(root === "" ? 0 : root.length + 1).split("/");
+    if (rest !== null && (!best || root.length > best.len)) best = { len: root.length, instance: [...m.instance, ...rest] };
+  }
+  return best;
+}
+
+/** The repo path a mount builds its instance from: the directory, or a file's identity
+ * (a Script's too — it locates the instance, even though it is never a require target). */
+function mountIdentity(m: RojoMount): string | null {
+  return /\.(luau|lua)$/i.test(m.path) ? luauIdentity(m.path, true) : m.path;
+}
+
+/** The mounts of each Rojo project that builds `identity` most specifically, keyed by
+ * project file. A project that mounts the file's own folder (or the file) was made for
+ * it, and outranks one that only takes it along inside a whole `src/server`: in a repo
+ * with a general place and per-map places, a map's modules run in the map's place. */
+function projectsBuilding(identity: string, mounts: RojoMount[]): Map<string, RojoMount[]> {
+  const byProject = new Map<string, RojoMount[]>();
+  for (const m of mounts) push(byProject, m.project, m);
+  const depth = new Map<string, number>();
+  for (const [project, ms] of byProject) {
+    const hit = luauMountOf(identity, ms);
+    if (hit) depth.set(project, hit.len);
+  }
+  const deepest = Math.max(-1, ...depth.values());
+  for (const project of [...byProject.keys()]) if (depth.get(project) !== deepest) byProject.delete(project);
+  return byProject;
+}
+
+/** The single module file a DataModel instance path is built from, per these Rojo mounts:
+ * the longest mount prefix wins, and every mount at that length is tried, since several
+ * projects can map one instance to different directories. Two different files at that
+ * level is "ambiguous" — the caller keeps the string rather than guess between them. */
+function luauInstanceFile(instance: string[], mounts: RojoMount[], one: (p: string | null) => string | null): string | "ambiguous" | null {
+  const fits = mounts.filter((m) => m.instance.length <= instance.length && m.instance.every((s, i) => s === instance[i]));
+  for (const len of [...new Set(fits.map((m) => m.instance.length))].sort((a, b) => b - a)) {
+    const hits = new Set<string>();
+    for (const m of fits) {
+      if (m.instance.length !== len) continue;
+      let p = mountIdentity(m);
+      for (const s of instance.slice(len)) p = luauChild(p, s);
+      const hit = one(p);
+      if (hit) hits.add(hit);
+    }
+    if (hits.size === 1) return [...hits][0];
+    if (hits.size > 1) return "ambiguous";
+  }
+  return null;
+}
+
+/**
+ * Resolve a Luau `require` specifier (as extractLuauRequires spells it) to the in-repo
+ * module file(s) it loads; otherwise `[spec]`, the specifier unchanged.
+ *
+ *   - `script.Parent.X` — relative to the requiring file. When Rojo projects build the
+ *     file, in instance space in each of them (a project may mount a file away from its
+ *     folder: `Map` can be `MapA/` in one place and `MapB/` in another); otherwise as
+ *     Rojo lays files out by default (a file is a child of its folder; an `init.luau` IS
+ *     its folder).
+ *   - `game.Service.A.B` — absolute: through the mounts of the Rojo projects that build
+ *     the requiring file. A file no project builds tries every project, then the longest
+ *     unique path-suffix (`A/B`, then `B`), as PHP's PSR-4 tails are.
+ *   - `alias.A.B` — rooted at a name extraction could not see through (a parameter, an
+ *     upvalue): the unique path-suffix rule over what follows it.
+ *   - `./x`, `../x`, `@self/x` — Luau's require-by-string, relative to the requiring module.
+ *     `@alias/x` (a .luaurc alias) is left as written.
+ *
+ * Several targets only when several places run the file and each states its own module
+ * (`projectsBuilding`): every edge is then certain in the place it comes from. Otherwise
+ * certain matches and unique suffixes only — a relative require that misses, or a name
+ * two files could answer, stays the string, never a guessed edge.
+ */
+function resolveLuauRequire(spec: string, file: string, idx: LuauIndex): string[] {
+  const self = luauIdentity(file, true);
+  if (self === null) return [spec];
+  const one = (p: string | null): string | null => {
+    const hits = p === null ? undefined : idx.byIdentity.get(p);
+    return hits && hits.length === 1 ? hits[0] : null;
+  };
+  const walk = (start: string | null, steps: string[]): string | null => {
+    let p = start;
+    for (const s of steps) p = s === ".." ? luauParent(p) : luauChild(p, s);
+    return p;
+  };
+  const found = (hit: string | null | undefined): string[] => [hit ?? spec];
+
+  if (/^(\.\.?\/|@self(\/|$))/.test(spec)) {
+    const parts = spec.replace(/\.(luau|lua)$/i, "").split("/").filter((s) => s !== "" && s !== ".");
+    if (parts[0] === "@self") return found(one(walk(self, parts.slice(1))));
+    // `./` and `../` start at the module's parent (an init.luau's module is its folder);
+    // before Luau amended that rule they started at the file's own directory.
+    const isInit = /(^|\/)init(\.(server|client))?\.(luau|lua)$/i.test(toPosixPath(file));
+    return found(one(walk(luauParent(self), parts)) ?? (isInit ? one(walk(self, parts)) : null));
+  }
+  if (spec.startsWith("@")) return [spec];
+
+  const segs = spec.split(".");
+  const suffix = (tail: string[]): string | null => {
+    for (let i = 0; i < tail.length; i++) {
+      const hits = idx.bySuffix.get(tail.slice(i).join("/"));
+      if (hits?.length === 1) return hits[0];
+      if (hits && hits.length > 1) return null; // ambiguous at the most specific level — do not guess
+    }
+    return null;
+  };
+  const projects = segs[0] === "script" || segs[0] === "game" ? projectsBuilding(self, idx.mounts) : new Map<string, RojoMount[]>();
+  // Each place's own answer, where it has a single one. A project whose mounts can't
+  // decide between two files contributes nothing.
+  const perPlace = (answer: (mounts: RojoMount[]) => string | "ambiguous" | null): string[] => {
+    const hits = new Set<string>();
+    for (const mounts of projects.values()) {
+      const hit = answer(mounts);
+      if (hit && hit !== "ambiguous") hits.add(hit);
+    }
+    return [...hits].sort();
+  };
+  if (segs[0] === "script") {
+    const steps = segs.slice(1);
+    const viaPlaces = perPlace((mounts) => {
+      let inst = luauInstanceIn(self, mounts);
+      for (const s of steps) inst = inst === null ? null : s === "Parent" ? (inst.length > 0 ? inst.slice(0, -1) : null) : [...inst, s];
+      return inst ? luauInstanceFile(inst, mounts, one) : null;
+    });
+    if (viaPlaces.length > 0) return viaPlaces;
+    return found(one(steps.reduce<string | null>((p, s) => (s === "Parent" ? luauParent(p) : luauChild(p, s)), self)));
+  }
+  if (segs[0] === "game") {
+    const instance = segs.slice(1);
+    // The file runs in these places only: what they don't build is not in the repo.
+    if (projects.size > 0) {
+      const viaPlaces = perPlace((mounts) => luauInstanceFile(instance, mounts, one));
+      return viaPlaces.length > 0 ? viaPlaces : [spec];
+    }
+    const viaMount = luauInstanceFile(instance, idx.mounts, one);
+    if (viaMount === "ambiguous") return [spec];
+    return found(viaMount ?? suffix(instance));
+  }
+  // A name we could not see through: only what follows its last `.Parent` names files.
+  return found(suffix(segs.slice(segs.lastIndexOf("Parent") + 1)));
 }
 
 /**

@@ -490,6 +490,11 @@ compiler-grade layer, all `$0` and deterministic (no model, no key):
   call edges via a generic tree-sitter extractor, one grammar per language:
   **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
   Dart, Clojure, Nix, Lua, Luau** (`.lua` / `.luau`, each with its own grammar), and **OCaml, Zig** (symbols only for now, no call edges).
+  Luau also gets its module graph: each `require(...)` (by instance path such as
+  `script.Parent.Units` or `game:GetService("ReplicatedStorage").Shared.Units`, or
+  by string) becomes an import, placed through the repo's Rojo `*.project.json`
+  files when it has them, and a call through the required name (`Units.toStuds()`)
+  resolves in that module only.
 
 - **Compiler-grade edges (opt-in)**: `trail build --lsp` adds precise
   `lsp_resolved` call edges (member calls the static pass can't type) when a

@@ -62,6 +62,7 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "clojure", exts: [".clj", ".cljs", ".cljc", ".bb"], wasm: "clojure" },
   { name: "nix", exts: [".nix"], wasm: "nix" },
   { name: "lua", exts: [".lua"], wasm: "lua" },
+  // Not in tree-sitter-wasm: the grammar is vendored in graph/grammars (see its README).
   { name: "luau", exts: [".luau"], wasm: "luau" },
 ];
 
@@ -320,8 +321,12 @@ export function extractGeneric(rel: string, source: string, langName: string): E
     defs.push({ id, startIndex: whole.startIndex, endIndex: whole.endIndex });
   };
 
+  // Luau has no import statement: a module is a `require(...)` of an instance path
+  // or a string, usually bound to a local. Read those first, so a call through the
+  // bound name (`Route.build()`) can carry the module it was required from.
+  const luau = langName === "luau" ? extractLuauRequires(tree.rootNode as TsNode, rel) : null;
   if (entry.query) {
-    tagsExtract(entry.query, tree.rootNode as TsNode, rel, mkDef, defs, rawEdges, langName);
+    tagsExtract(entry.query, tree.rootNode as TsNode, rel, mkDef, defs, rawEdges, langName, luau?.callModules);
   } else {
     walkExtract(tree.rootNode as TsNode, mkDef); // no tags.scm → symbols only
   }
@@ -331,7 +336,157 @@ export function extractGeneric(rel: string, source: string, langName: string): E
   if (langName === "c" || langName === "cpp") extractIncludes(tree.rootNode as TsNode, rel, rawEdges);
   else if (langName === "rust") extractUses(tree.rootNode as TsNode, rel, rawEdges);
   else if (langName === "php") extractPhpUses(tree.rootNode as TsNode, rel, rawEdges);
+  else if (luau) rawEdges.push(...luau.imports);
   return { nodes, rawEdges };
+}
+
+/** What a Luau file requires: one `imports` raw edge per distinct module, and the
+ * module behind each call made through a require-bound name, keyed by the byte
+ * offset of the called name (the same offset tagsExtract sees for that call). */
+interface LuauRequires {
+  imports: RawEdge[];
+  callModules: Map<number, string>;
+}
+
+/** The globals an instance path can start from. A Map, not an object literal, so a
+ * local named `constructor` or `toString` is not mistaken for one. */
+const LUAU_ROOTS = new Map<string, string[]>([["game", ["game"]], ["script", ["script"]], ["workspace", ["game", "Workspace"]]]);
+/** Instance methods that name one child by string, as `.Child` does. */
+const LUAU_CHILD_METHODS = new Set(["GetService", "WaitForChild", "FindFirstChild"]);
+
+/** Luau `require(...)` → `imports` raw edges, plus the module behind each call through
+ * a require-bound name. The specifier is the require's argument read as text, so
+ * resolve.ts can settle it against the repo's files (and Rojo projects):
+ *   - an instance path, dot-joined: `script.Parent.Route`, `game.ReplicatedStorage.Shared.Units`
+ *     (`:GetService("X")`, `:WaitForChild("X")` and `["X"]` read as `.X`), with a local bound
+ *     earlier in the file to a path (`local RS = game:GetService("ReplicatedStorage")`)
+ *     substituted for its name;
+ *   - a string require, verbatim: `./Route`, `../util/Strings`, `@self/Child`, `@pkg/name`.
+ * An argument that isn't one of those (a computed value) is skipped, never guessed. */
+function extractLuauRequires(root: TsNode, rel: string): LuauRequires {
+  const imports: RawEdge[] = [];
+  const seenSpecs = new Set<string>();
+  const callModules = new Map<number, string>();
+  // Names bound so far in document order, latest last: to an instance path, or to a module.
+  const paths = new Map<string, string[]>();
+  const modules = new Map<string, string>();
+
+  const child = (n: TsNode, field: string): TsNode | null => n.childForFieldName?.(field) ?? null;
+  const named = (n: TsNode): TsNode[] => {
+    const out: TsNode[] = [];
+    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
+      const c = n.namedChild?.(i);
+      if (c) out.push(c);
+    }
+    return out;
+  };
+  const stringValue = (n: TsNode): string | null => {
+    if (n.type !== "string" || named(n).some((c) => c.type === "interpolation")) return null;
+    const m = n.text.match(/^(?:"([^"]*)"|'([^']*)'|`([^`]*)`|\[(=*)\[([\s\S]*)\]\4\])$/);
+    return m ? (m[1] ?? m[2] ?? m[3] ?? m[5] ?? null) : null;
+  };
+  const singleArg = (call: TsNode): TsNode | null => {
+    const args = child(call, "arguments");
+    if (!args) return null;
+    const list = named(args).filter((c) => c.type !== "comment");
+    return list.length === 1 ? list[0] : null;
+  };
+  // The instance path an expression names, or null when it is computed.
+  const pathOf = (n: TsNode | null, depth = 0): string[] | null => {
+    if (!n || depth > 32) return null;
+    switch (n.type) {
+      case "identifier":
+        return paths.get(n.text) ?? LUAU_ROOTS.get(n.text) ?? [n.text];
+      case "dot_index_expression": {
+        const base = pathOf(child(n, "table"), depth + 1);
+        const field = child(n, "field")?.text;
+        return base && field ? [...base, field] : null;
+      }
+      case "bracket_index_expression": {
+        const base = pathOf(child(n, "table"), depth + 1);
+        const field = child(n, "field");
+        const key = field ? stringValue(field) : null;
+        return base && key ? [...base, key] : null;
+      }
+      case "function_call": {
+        const name = child(n, "name");
+        if (name?.type !== "method_index_expression") return null;
+        if (!LUAU_CHILD_METHODS.has(child(name, "method")?.text ?? "")) return null;
+        const arg = singleArg(n);
+        const key = arg ? stringValue(arg) : null;
+        const base = pathOf(child(name, "table"), depth + 1);
+        return base && key ? [...base, key] : null;
+      }
+      case "parenthesized_expression":
+      case "cast_expression":
+        return pathOf(named(n)[0] ?? null, depth + 1);
+      default:
+        return null;
+    }
+  };
+  // `require(x)` → the specifier x names, or null when n is not such a call.
+  const requireSpec = (n: TsNode): string | null => {
+    if (n.type !== "function_call") return null;
+    const name = child(n, "name");
+    if (name?.type !== "identifier" || name.text !== "require") return null;
+    const arg = singleArg(n);
+    if (!arg) return null;
+    const str = stringValue(arg);
+    if (str !== null) return str.trim() || null;
+    const p = pathOf(arg);
+    return p && p.length > 1 ? p.join(".") : null;
+  };
+  // Each name of a `local a, b = x, y` / `a = x` paired with its value.
+  const bindings = (stmt: TsNode): Array<[string, TsNode]> => {
+    const parts = named(stmt);
+    const vars = parts.find((c) => c.type === "variable_list");
+    const vals = parts.find((c) => c.type === "expression_list");
+    if (!vars || !vals) return [];
+    const values = named(vals);
+    const out: Array<[string, TsNode]> = [];
+    named(vars).forEach((v, i) => {
+      if (v.type === "identifier" && values[i]) out.push([v.text, values[i]]);
+    });
+    return out;
+  };
+
+  const visit = (n: TsNode): void => {
+    const spec = requireSpec(n);
+    if (spec !== null && !seenSpecs.has(spec)) {
+      seenSpecs.add(spec);
+      imports.push({ source: rel, relation: "imports", specifier: spec, file: rel });
+    }
+    if (n.type === "function_call") {
+      // `Alias.fn()` / `Alias:fn()` through a require-bound name, or straight off
+      // the require (`require(x).fn()`): the called name's module is known.
+      const name = child(n, "name");
+      if (name?.type === "dot_index_expression" || name?.type === "method_index_expression") {
+        const table = child(name, "table");
+        const called = child(name, name.type === "dot_index_expression" ? "field" : "method");
+        const mod = table?.type === "identifier" ? modules.get(table.text) : table ? requireSpec(table) : null;
+        if (called && mod) callModules.set(called.startIndex, mod);
+      }
+    }
+    for (const c of named(n)) visit(c);
+    // Bind after the statement's own right-hand side was read with the earlier bindings.
+    if (n.type === "assignment_statement") {
+      for (const [name, value] of bindings(n)) {
+        const mod = requireSpec(value);
+        if (mod !== null) {
+          modules.set(name, mod);
+          paths.delete(name);
+          continue;
+        }
+        modules.delete(name);
+        // Only a path from a known root is worth substituting for the name.
+        const p = pathOf(value);
+        if (p && (p[0] === "game" || p[0] === "script")) paths.set(name, p);
+        else paths.delete(name);
+      }
+    }
+  };
+  visit(root);
+  return { imports, callModules };
 }
 
 /** PHP `use App\Models\User;` → a file→class-file `imports` raw edge, one per imported
@@ -424,7 +579,9 @@ function extractIncludes(root: TsNode, rel: string, rawEdges: RawEdge[]): void {
 }
 
 /** tags.scm path: @definition.<kind> → nodes, @reference.call/@reference.send →
- * bare-name call edges attributed to the innermost enclosing definition. */
+ * bare-name call edges attributed to the innermost enclosing definition. A call
+ * whose name offset is in `callModules` also carries that module as its specifier
+ * (Luau's require-bound names), so resolve.ts can look the name up in that module. */
 function tagsExtract(
   query: unknown,
   root: TsNode,
@@ -433,6 +590,7 @@ function tagsExtract(
   defs: Def[],
   rawEdges: RawEdge[],
   langName: string,
+  callModules?: Map<number, string>,
 ): void {
   const q = query as { matches(n: unknown): Array<{ captures: Array<{ name: string; node: TsNode }> }> };
   const matches = q.matches(root);
@@ -471,7 +629,8 @@ function tagsExtract(
   for (const c of calls) {
     if (defNameAt.has(c.at)) continue;
     const enc = enclosing(c.at);
-    rawEdges.push({ source: enc ? enc.id : rel, relation: "calls", file: rel, name: c.name });
+    const specifier = callModules?.get(c.at);
+    rawEdges.push({ source: enc ? enc.id : rel, relation: "calls", file: rel, name: c.name, ...(specifier ? { specifier } : {}) });
   }
   for (const r of refs) {
     if (defNameAt.has(r.at)) continue;

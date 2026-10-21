@@ -17,6 +17,7 @@ language) that now covers most of them. With gratitude to:
   extractor instead of skipping them.
 - **@kapelner** (#69) — C/C++; (#70) — R.
 - **@CroissantEdit** (#187) — Lua.
+- **@ansien** (#266) — Luau, with its own vendored grammar.
 - **@Ansh-Sonkusare** (#159) — Nix.
 - **@shovelmn12** (#130) — Kotlin, promoted to full-fidelity depth extraction.
 - **@mattstrayer** (#219) — Swift.

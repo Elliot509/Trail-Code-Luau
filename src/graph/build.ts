@@ -34,7 +34,7 @@ import {
 import { writeFingerprint } from "./fingerprint.js";
 import { seedGraph, type SeedResult } from "./seed.js";
 import { filterByOnlyDirs, listSourceStats } from "./source-files.js";
-import { resolveEdges, type GoModule } from "./resolve.js";
+import { resolveEdges, type GoModule, type RojoMount } from "./resolve.js";
 import { enrichGraph, type EnrichStats } from "./enrich.js";
 import { readGraph, writeGraph, wiringPath } from "./write.js";
 import { writeCards, writeIndex, writeCovers, type CardStats } from "./cards.js";
@@ -201,6 +201,41 @@ function readGoModules(root: string, repoFiles: string[]): GoModule[] {
   return mods;
 }
 
+/** Every `$path` mount of every Rojo `*.project.json` in the repo whose tree is a
+ * DataModel (a place): the instance path each one builds and the repo-relative path it
+ * reads. Lets edge resolution map an absolute Luau require (`game.ReplicatedStorage.X`)
+ * to the file Rojo builds that instance from. A library project (whose tree is not a
+ * DataModel) has no fixed place in the game, so it contributes nothing; a `$path`
+ * outside the repo or a file that isn't JSON is skipped. Read from the same
+ * enumeration as {@link readGoModules}, so it honours the same ignore rules. */
+function readRojoMounts(root: string, repoFiles: string[]): RojoMount[] {
+  const mounts: RojoMount[] = [];
+  for (const f of repoFiles) {
+    if (!basename(f).endsWith(".project.json")) continue;
+    let tree: unknown;
+    try {
+      tree = (JSON.parse(readFileSync(f, "utf8")) as { tree?: unknown }).tree;
+    } catch {
+      continue; /* unreadable or not JSON — skip this project */
+    }
+    if (!tree || typeof tree !== "object" || (tree as Record<string, unknown>).$className !== "DataModel") continue;
+    const project = relPosix(root, f);
+    const visit = (node: Record<string, unknown>, instance: string[]): void => {
+      const p = node.$path;
+      const fsPath = typeof p === "string" ? p : p && typeof p === "object" ? (p as { optional?: unknown }).optional : undefined;
+      if (typeof fsPath === "string") {
+        const rel = relPosix(root, resolve(dirname(f), fsPath));
+        if (rel !== ".." && !rel.startsWith("../") && !/^[a-zA-Z]:/.test(rel)) mounts.push({ project, instance, path: rel.replace(/\/+$/, "") });
+      }
+      for (const [key, child] of Object.entries(node)) {
+        if (!key.startsWith("$") && child && typeof child === "object") visit(child as Record<string, unknown>, [...instance, key]);
+      }
+    };
+    visit(tree as Record<string, unknown>, []);
+  }
+  return mounts;
+}
+
 export async function buildGraph(
   dir: string,
   opts: GraphBuildOptions = {},
@@ -347,7 +382,10 @@ export async function buildGraph(
     files: entries,
   });
 
-  const edges = resolveEdges(nodes, rawEdges, { goModules: readGoModules(root, repoFiles) });
+  const edges = resolveEdges(nodes, rawEdges, {
+    goModules: readGoModules(root, repoFiles),
+    rojoMounts: readRojoMounts(root, repoFiles),
+  });
 
   // Guard 5 (minimum-substance): node counts aren't known until nodes are
   // assembled, so the merge-tiny-scopes-into-root guard runs here.
