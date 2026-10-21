@@ -52,7 +52,7 @@ JavaScript part of the graph came out identical node for node and edge for edge.
 ## Install from source
 
 ```sh
-git clone https://github.com/<owner>/Trail-Code-Luau.git
+git clone https://github.com/Elliot509/Trail-Code-Luau.git
 cd Trail-Code-Luau
 git config core.autocrlf false   # on Windows: keep LF, so generated hooks and the skill match upstream byte for byte
 npm ci                           # also builds dist/
