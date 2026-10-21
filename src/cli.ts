@@ -71,7 +71,7 @@ import { formatOverlap, maybeRefreshBranches, overlapsWith, pushedWhen, readBran
 import { ensureRepoTrail, LEARNINGS_DIR } from "./notes/repo-trail.js";
 import type { AskResult } from "./ask/ask.js";
 import { setInputRate } from "./context/savings.js";
-import { formatUpdateNudge, maybeRefreshInBackground, readStamp, readUpdateCache, refreshUpdateCache, wiredHostIds, wiringOpts, writeStamp } from "./upkeep.js";
+import { formatUpdateNudge, maybeRefreshInBackground, readStamp, readUpdateCache, refreshUpdateCache, wiredHostIds, wiringOpts, wiringVersion, writeStamp } from "./upkeep.js";
 import { shouldMoveToTrail } from "./upkeep-run.js";
 import {
   countBucket,
@@ -1821,7 +1821,7 @@ function wireTarget(
     // them on a mismatch, so an `npm i -g` upgrade reaches the hooks/skill/rules
     // too — not just the binary. The flags ride along so a refresh replays the
     // user's choices (notably --no-global) instead of overriding them.
-    writeStamp(repo, currentVersion, ids, {
+    writeStamp(repo, wiringVersion(currentVersion), ids, {
       global: opts.global !== false,
       mcp: opts.mcp !== false,
       hooks: opts.hooks !== false,

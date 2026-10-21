@@ -20,6 +20,14 @@
   same-named function elsewhere, and is `extracted` (certain).
 - Lua and Luau share a call-resolution family, as Rojo reads both as Luau.
 
+### Unchanged on purpose
+
+- **Installing or removing this build rewrites no wiring.** Its hooks, shims
+  and skill are 0.23.1's byte for byte, so it stamps a repo's wiring as 0.23.1:
+  a session after switching either way finds the stamp current and leaves
+  `.trail/`, `.claude/` and `~/.claude` as they are.
+- This local build has no telemetry key, so it sends no usage stats.
+
 ## 0.23.1
 
 ### Fixed

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { main } from '../src/claude/hooks.js';
-import { readStamp, runningVersion, updateCachePath } from '../src/upkeep.js';
+import { readStamp, runningVersion, updateCachePath, wiringVersion } from '../src/upkeep.js';
 import { tmpRepo } from './helpers.js';
 
 /** A repo that looks like a previous `graft init` ran here, with no stamp — i.e.
@@ -71,7 +71,8 @@ test('session-start refreshes stale wiring and stamps it', async () => {
   // The wiring was actually re-written, not just announced.
   assert.ok(existsSync(join(repo, '.claude', 'settings.json')));
   assert.ok(existsSync(join(repo, '.claude', 'skills', 'graft', 'SKILL.md')));
-  assert.equal(readStamp(repo)?.version, runningVersion());
+  // The version whose wiring was written: the running one (a local Luau build stamps its release).
+  assert.equal(readStamp(repo)?.version, wiringVersion(runningVersion()));
   assert.deepEqual(readStamp(repo)?.hosts, ['claude']);
 });
 

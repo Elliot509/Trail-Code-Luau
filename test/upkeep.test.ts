@@ -17,6 +17,7 @@ import {
   updateCachePath,
   wiredHostIds,
   wiringOpts,
+  wiringVersion,
   writeStamp,
   type WiringOpts,
 } from '../src/upkeep.js';
@@ -176,6 +177,28 @@ test('reconcileWiring rewrites once on a version mismatch, then no-ops', () => {
   assert.deepEqual(upgraded, { from: '2.0.0', to: '2.1.0', hosts: ['claude', 'cursor'], global: true });
   assert.equal(calls.length, 2);
   assert.equal(readStamp(repo)?.version, '2.1.0');
+});
+
+test('a local Luau build wires as its release: switching either way refreshes nothing', () => {
+  assert.equal(wiringVersion('0.23.1-luau.1'), '0.23.1');
+  assert.equal(wiringVersion('0.23.1-luau.12'), '0.23.1');
+  assert.equal(wiringVersion('0.23.1'), '0.23.1');
+  assert.equal(wiringVersion('0.24.0-beta.1'), '0.24.0-beta.1', 'an official pre-release keeps its own wiring');
+
+  const repo = tmpRepo('upkeep-luau-build');
+  const calls: string[][] = [];
+  const rewrite = (_r: string, hosts: string[]) => { calls.push(hosts); };
+  const wired = () => ['claude'];
+  writeStamp(repo, '0.23.1', ['claude']);
+  // Installing the Luau build over 0.23.1: the hooks, shims and skill are 0.23.1's.
+  assert.equal(reconcileWiring(repo, '0.23.1-luau.1', { wired, rewrite }), null);
+  // And rolling back to 0.23.1 finds the stamp it wrote itself.
+  assert.equal(reconcileWiring(repo, '0.23.1', { wired, rewrite }), null);
+  assert.deepEqual(calls, []);
+  // A repo wired by an older release still refreshes, and is stamped as the release.
+  writeStamp(repo, '0.22.0', ['claude']);
+  assert.deepEqual(reconcileWiring(repo, '0.23.1-luau.1', { wired, rewrite })?.to, '0.23.1');
+  assert.equal(readStamp(repo)?.version, '0.23.1');
 });
 
 test('reconcileWiring restores a host whose file went missing', () => {

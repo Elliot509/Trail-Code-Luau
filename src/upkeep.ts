@@ -49,6 +49,17 @@ export function runningVersion(): string {
   try { return readCurrentVersion(import.meta.url); } catch { return '0.0.0'; }
 }
 
+/**
+ * The version whose agent wiring a build writes, which is what the wiring stamp
+ * records and compares. A local Luau build (`0.23.1-luau.1`) changes the code map
+ * only: its hooks, shims and skill are its release's byte for byte. Stamped as its
+ * release, switching between it and that release refreshes nothing, so neither
+ * installing it nor rolling back rewrites a repo's files or `~/.claude`.
+ */
+export function wiringVersion(version: string): string {
+  return version.replace(/-luau\.\d+$/, '');
+}
+
 /** How long a registry answer is considered current. A day: graft ships far less
  * often than that, and this is a nudge, not a security update. */
 export const UPDATE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -282,6 +293,7 @@ export function reconcileWiring(
   },
 ): WiringRefresh | null {
   try {
+    current = wiringVersion(current);
     const stamp = readStamp(repo);
     const toTrail = deps.toTrail?.(repo) ?? false;
     if (stamp && stamp.version === current && !toTrail) return null;
