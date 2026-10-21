@@ -489,7 +489,7 @@ compiler-grade layer, all `$0` and deterministic (no model, no key):
 - **Broad**: symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
   **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
-  Dart, Clojure, Nix, Lua**, and **OCaml, Zig** (symbols only for now, no call edges).
+  Dart, Clojure, Nix, Lua, Luau** (`.lua` / `.luau`, each with its own grammar), and **OCaml, Zig** (symbols only for now, no call edges).
 
 - **Compiler-grade edges (opt-in)**: `trail build --lsp` adds precise
   `lsp_resolved` call edges (member calls the static pass can't type) when a
@@ -498,7 +498,7 @@ compiler-grade layer, all `$0` and deterministic (no model, no key):
   **gopls** (Go), **pyright** (Python), **typescript-language-server** (TS/JS).
   It's best-effort: with no server installed the graph is unchanged.
 
-Twenty-three languages, plus Vue single-file components. A file whose language isn't listed is skipped, not
+Twenty-four languages, plus Vue single-file components. A file whose language isn't listed is skipped, not
 indexed. Adding a broad-tier language is a small contribution; see
 [CREDITS.md](CREDITS.md) for the folks who added the current set.
 
