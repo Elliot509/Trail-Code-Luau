@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.23.1-luau.1 (local experimental build, not published)
+## 0.23.1-luau.1 (Trail-Code-Luau, unofficial community fork; not on npm)
 
 0.23.1 plus Luau. Everything else is 0.23.1 unchanged.
 
@@ -26,7 +26,7 @@
   and skill are 0.23.1's byte for byte, so it stamps a repo's wiring as 0.23.1:
   a session after switching either way finds the stamp current and leaves
   `.trail/`, `.claude/` and `~/.claude` as they are.
-- This local build has no telemetry key, so it sends no usage stats.
+- A build from this fork has no telemetry key, so it sends no usage stats.
 
 ## 0.23.1
 

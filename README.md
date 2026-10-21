@@ -1,3 +1,168 @@
+# Trail-Code-Luau
+
+> **Unofficial community fork** of [trailhq/Trail-Code](https://github.com/trailhq/Trail-Code).
+> Not affiliated with or endorsed by Trail or the Trail-Code maintainers. Not published to npm.
+
+This fork is **Trail-Code 0.23.1 plus first-class Luau support**, built for Roblox projects
+laid out with [Rojo](https://rojo.space). It adds Luau parsing with its own grammar, plus a
+module graph built from `require(...)` and Rojo projects. Everything else is upstream 0.23.1
+unchanged: same CLI (`trail`), hooks, skill, learnings and MCP server.
+
+Base: upstream release commit [`b1211ef`](https://github.com/trailhq/Trail-Code/commit/b1211efd3eef0efa121b93800e5dd8e547aead77)
+(`chore(release): 0.23.1`). Fork version: `0.23.1-luau.1`. The original README follows
+[below](#upstream-readme).
+
+## What this fork adds
+
+- **A dedicated Luau parser.** `.luau` files are parsed by the vendored
+  [`tree-sitter-luau`](https://github.com/tree-sitter-grammars/tree-sitter-luau) 1.2.0 WASM
+  grammar, not by Lua's. Types, `::` casts, compound assignment (`+=`), `continue`,
+  if-expressions, generics and string interpolation parse structurally. This builds on
+  upstream PR [#266](https://github.com/trailhq/Trail-Code/pull/266) by
+  [@ansien](https://github.com/ansien), ported onto 0.23.1.
+- **Symbols.** Functions (`function M.f`, `local function f`, assigned and table-field
+  functions), methods (`function M:m`) and type aliases (`type T`, `export type T<A>`).
+- **`require()` as the module graph.** Each `require` becomes an `imports` edge, written as
+  an instance path (`script.Parent.Units`, `game:GetService("ReplicatedStorage").Shared.Units`,
+  `:WaitForChild("X")`, `["X"]`, and locals bound to such paths) or as a string (`./x`,
+  `../x`, `@self/x`). Computed arguments are skipped, never guessed.
+- **Rojo-aware resolution.** Every `*.project.json` with a `DataModel` tree is read into
+  instance-to-folder mounts. An absolute require resolves in the places (projects) that
+  mount the requiring file most specifically. A file run by several places, each with its
+  own module, links each of them. A relative `script.Parent…` require follows Rojo's layout
+  (a file is a child of its folder; `init.luau` *is* its folder). With no project file, a
+  unique path suffix resolves it, and an ambiguous one stays unresolved.
+- **Cross-module calls.** `Units.toStuds()` after `local Units = require(...)` is resolved
+  inside that module only, as a certain (`extracted`) edge. This removes false edges that
+  plain name matching produces, for example `Route.project()` called inside a local function
+  also named `project` becoming a self-loop.
+- `.lua` and `.luau` share a call-resolution family, since Rojo reads both as Luau.
+
+Upstream behaviour for every other language is unchanged: on a mixed repo, the Python and
+JavaScript part of the graph came out identical node for node and edge for edge.
+
+## Requirements
+
+- Node.js **20 or newer** (tested with 24.19), npm, and git.
+- A C/C++ toolchain for `tree-sitter-kotlin`, the one native dependency built from source
+  at install, exactly as in upstream (Visual Studio Build Tools on Windows, Xcode Command
+  Line Tools on macOS, `build-essential` on Linux). The other native grammars ship
+  prebuilt binaries.
+
+## Install from source
+
+```sh
+git clone https://github.com/<owner>/Trail-Code-Luau.git
+cd Trail-Code-Luau
+git config core.autocrlf false   # on Windows: keep LF, so generated hooks and the skill match upstream byte for byte
+npm ci                           # also builds dist/
+node scripts/pack-trail.mjs      # lays out the @trailhq/trail-code package in build/trail
+npm pack ./build/trail           # → trailhq-trail-code-0.23.1-luau.1.tgz
+npm install -g ./trailhq-trail-code-0.23.1-luau.1.tgz
+trail --version                  # 0.23.1-luau.1
+```
+
+The package keeps upstream's name and `trail` command, so it **replaces** an installed
+`@trailhq/trail-code`. To try it without touching a global install, use an isolated
+prefix: `npm install -g --prefix <dir> <tgz>`, then run `<dir>/trail`.
+
+Then, in a repository:
+
+```sh
+trail build          # the banner should list luau among the languages
+trail grep <Name>
+trail skeleton path/to/Module.luau
+trail callers path/to/Module.luau      # who requires this module
+trail callers someFunction             # who calls this function
+```
+
+Run `trail build` after switching between this build and upstream, in either direction.
+
+### Going back to upstream
+
+```sh
+npm install -g @trailhq/trail-code@0.23.1
+trail build
+```
+
+This fork's hooks, shims and skill are byte-identical to upstream 0.23.1, and it stamps a
+repo's wiring as `0.23.1`. Switching either way rewrites nothing in `.trail/`, `.claude/`
+or `~/.claude`.
+
+Do not run `trail upgrade` while on this build: it installs the latest upstream release,
+which has no Luau.
+
+## Tests
+
+- **Full suite (`npm test`), Windows 11, Node 24:** 1472 tests, 1450 pass, 10 fail, 12
+  skipped. The 10 failures are identical on unmodified upstream 0.23.1 on the same machine:
+  8 expect `100,000` number formatting where the OS locale is pt-BR, and 2 rely on a
+  non-Windows shell. No regressions.
+- **16 new tests**, all passing: `test/luau.test.ts` and
+  `test/fixtures/luau-project/`, a small synthetic Rojo place. They cover `--!strict`,
+  `export type`, generic and intersection types, typed functions and methods, `::` casts,
+  compound assignment, `continue`, interpolation, requires by instance path, service, alias
+  and string, multi-place Rojo projects, `init.luau`, a legacy `.lua` module, and a
+  same-named module to check that ambiguity never becomes a guessed edge.
+- **Real project:** a private Rojo game with 151 `.luau` files. All 151 parsed with zero
+  `ERROR` nodes. Upstream 0.23.1 indexes none of them; this fork extracts 360 symbols,
+  resolves 147 of 161 requires (91%, every target audited by name), and resolves 732 calls
+  (372 across files). The 14 unresolved requires are genuinely ambiguous: files no Rojo
+  project mounts, asking for a module that exists in several folders.
+- **Claude Code integration**, in an isolated home: SessionStart, UserPromptSubmit,
+  PostToolUse, Stop and SessionEnd hooks, learnings, `trail check`, the status line,
+  automatic index refresh, and the MCP server (`trail mcp`, 6 tools) all work. `trail init`
+  writes the same files as upstream.
+
+## Limitations
+
+- **No type inference.** `obj:method()` on an instance is matched by bare name only:
+  resolved when the name is unique in the repo, dropped when it is ambiguous. Type
+  annotations do not create "uses type" edges.
+- **Unresolved modules.** `.luaurc` aliases (`@pkg/...`) and packages outside the repo (for
+  example Wally `Packages/`) are kept as unresolved strings. A module reached through a
+  function parameter resolves only by a unique path suffix.
+- **Grammar gaps in tree-sitter-luau 1.2.0** (parsed with error recovery): generic defaults
+  (`<T = number>`), generic type packs (`<T...>`), `read`/`write` property modifiers,
+  `typeof()` in annotations, `@native`/`@checked` attributes, and `type function`. See
+  [`src/graph/grammars/README.md`](src/graph/grammars/README.md).
+- Changing only a `*.project.json` does not trigger a re-index (as with `go.mod`): run
+  `trail build`.
+- The optional LLM layer (`trail build --deep`) does not summarise `.lua`/`.luau` files, as
+  in upstream.
+- Seen on Windows and present in upstream 0.23.1, not fixed here: the PostToolUse "blast
+  radius" never appears because Windows paths use `\`, and the tokens-saved tally misreads
+  locale-formatted numbers.
+
+## Credits and license
+
+- **Trail-Code**, by Trail and its contributors ([trailhq/Trail-Code](https://github.com/trailhq/Trail-Code)),
+  MIT. This fork keeps the full upstream history and [LICENSE](LICENSE).
+- **[@ansien](https://github.com/ansien)**: Luau support in upstream PR
+  [#266](https://github.com/trailhq/Trail-Code/pull/266), the base of this fork's parser.
+- **tree-sitter-luau** by Amaan Qureshi and contributors
+  ([tree-sitter-grammars/tree-sitter-luau](https://github.com/tree-sitter-grammars/tree-sitter-luau)),
+  MIT. Vendored unmodified as `src/graph/grammars/tree-sitter-luau.wasm`, with its
+  [license](src/graph/grammars/tree-sitter-luau.LICENSE) and provenance (SHA-256,
+  release asset) next to it.
+- **tree-sitter** and **web-tree-sitter** by Max Brunsfeld and contributors, MIT;
+  **tree-sitter-wasm** by Crysthamus, MIT; and the other upstream dependencies under their
+  own licenses.
+- [Rojo](https://rojo.space): its project-file format is read here; no Rojo code is
+  included.
+
+Fork changes are released under the same MIT license. See [CHANGELOG.md](CHANGELOG.md)
+(`0.23.1-luau.1`) and [CREDITS.md](CREDITS.md).
+
+---
+
+<a id="upstream-readme"></a>
+
+## Upstream README
+
+*Everything below is upstream Trail-Code's README for 0.23.1, unchanged except for the
+Luau entries under "Supported languages".*
+
 <div align="center">
 
 <picture>

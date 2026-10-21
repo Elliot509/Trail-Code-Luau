@@ -24,3 +24,15 @@ language) that now covers most of them. With gratitude to:
 
 If you contributed a language PR and aren't listed here, please open an issue —
 the omission is an oversight, not a slight.
+
+## Trail-Code-Luau (unofficial community fork)
+
+The Luau support in this fork stands on:
+
+- **Trail and the Trail-Code contributors**: the project this fork is built on, MIT.
+- **@ansien** (upstream #266): the dedicated Luau grammar integration this fork ports
+  onto 0.23.1 and extends with `require()` and Rojo resolution.
+- **Amaan Qureshi and contributors**: [tree-sitter-luau](https://github.com/tree-sitter-grammars/tree-sitter-luau)
+  1.2.0, MIT, vendored unmodified in `src/graph/grammars/` with its license.
+- **Max Brunsfeld and the tree-sitter contributors**: tree-sitter and web-tree-sitter, MIT.
+- **Crysthamus**: tree-sitter-wasm, MIT.
